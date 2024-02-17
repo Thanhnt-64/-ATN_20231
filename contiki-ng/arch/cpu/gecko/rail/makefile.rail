@@ -1,0 +1,8 @@
+
+GSDK_C_SRCS += $(GSDK_ROOT)/platform/emdrv/gpiointerrupt/src/gpiointerrupt.c
+GSDK_SRC_PATHS += $(GSDK_ROOT)/platform/emdrv/gpiointerrupt/src
+GSDK_INC_PATHS += $(GSDK_ROOT)/platform/emdrv/gpiointerrupt/inc
+
+#radio/rail_lib/chip
+GSDK_INC_PATHS += $(GSDK_ROOT)/platform/raido/rail_lib/chip/efr32/efr32xg2x
+GSDK_INC_PATHS += $(GSDK_ROOT)/platform/raido/rail_lib/common

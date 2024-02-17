@@ -1,0 +1,19 @@
+### Will allow the inclusion of the correct OPN makefile
+DEVICE_OPN = mgm240pb32vnn
+###true
+
+BOARD_SOURCEFILES += board-leds.c
+BOARD_SOURCEFILES += board-buttons.c
+
+
+CFLAGS += -DBOARD_CONF_PATH=\"mgm24-conf.h\"
+
+CONTIKI_TARGET_DIRS += mgm24
+CONTIKI_TARGET_DIRS += mgm24/config
+CONTIKI_TARGET_DIRS += mgm24/common
+CONTIKI_TARGET_DIRS += mgm24/autogen
+CONTIKI_TARGET_DIRS += mgm24/dht11
+
+CONTIKI_TARGET_SOURCEFILES += max30100.c
+CONTIKI_TARGET_SOURCEFILES += myDriver.c
+CONTIKI_TARGET_SOURCEFILES += dht11-sensor.c
