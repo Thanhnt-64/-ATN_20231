@@ -1,194 +1,185 @@
-#include "MAX30100.h"
+#include "max30100.h"
+#include "mgm240pb32vnn.h"
 #include "em_i2c.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include "string.h"
 #include "myDriver.h"
+#include "pin_config.h"
 #include "em_gpio.h"
-#include "gpio-hal.h"
+//Set up I2C, (SDA,SCL)
 
-static int bufferIR[16]={0};
-static int bufferRED[16]={0};
-static uint8_t indexIR = 0;
-static uint8_t indexRED = 0;
-static void shiftBuf(int *buff){
-    for(int i = 15; i > 0; i--){
-        buff[i] = buff[i] - 1;
-    }
-}
 I2C_TypeDef *i2c;
 
-static bool begin(unsigned long busSpeed)
+int read_register(uint8_t *regData, uint8_t numbyte)
 {
-    if (getPartId() != EXPECTED_PART_ID)
+  I2C_TransferSeq_TypeDef seq;
+  I2C_TransferReturn_TypeDef ret;
+
+  seq.addr = MAX30100_ADDRESS | 0x01;
+  seq.flags = I2C_FLAG_READ;
+
+  seq.buf[0].len  = numbyte;
+  seq.buf[0].data = regData;
+  seq.buf[1].len  = 0;
+  seq.buf[1].data = 0;
+
+  ret = I2C_TransferInit(I2C0, &seq);
+  while (ret == i2cTransferInProgress) {
+      ret = I2C_Transfer(I2C0);
+  }
+
+  if (ret != i2cTransferDone) {
+    // LED1 ON and infinite while loop to indicate I2C transmission problem
+    GPIO_PinOutSet(gpioPortC, 3);
+  }
+  return 1;
+}
+
+
+//Wire read and write protocols
+uint8_t i2c_write(uint8_t i2c_addr, uint8_t register_addr, uint8_t* buffer, uint8_t Nbyte )
+{
+    uint8_t ret;
+    ret = I2C_LeaderWrite(i2c_addr, register_addr, buffer, Nbyte);
+    return ret;
+}
+
+uint8_t i2c_read(uint8_t i2c_addr, uint8_t register_addr, uint8_t* buffer, uint8_t Nbyte )
+{
+    uint8_t ret;
+    ret = I2C_LeaderWrite(i2c_addr, register_addr, NULL, 0);
+    /* Send device address, with no STOP condition */
+        /* Read data, with STOP condition  */
+    //ret =  I2C_LeaderRead((i2c_addr|0x01), register_addr, buffer, Nbyte);
+    read_register(buffer, Nbyte);
+    return ret;
+}
+//
+
+void setLEDs(pulseWidth pw, ledCurrent red, ledCurrent ir){
+  uint8_t reg;
+  i2c_read(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &reg, 1);
+  reg = reg & 0xFC; // Set LED_PW to 00
+  reg = reg | pw;
+  i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &reg, 1);     // Mask LED_PW
+  reg = (red<<4) | ir;
+  i2c_write(MAX30100_ADDRESS, MAX30100_LED_CONFIG, &reg, 1); // write LED configs
+}
+
+void setSPO2(sampleRate sr){
+  uint8_t reg;
+  i2c_read(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &reg, 1);
+  reg = reg & 0xE3; // Set SPO2_SR to 000
+  reg = reg | (sr<<2);
+  i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &reg, 1); // Mask SPO2_SR
+  i2c_read(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);
+  reg = reg & 0xf8; // Set Mode to 000
+  reg = reg | 0x03;
+  i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &reg, 1); // Mask MODE
+}
+
+int getNumSamp(void){
+    uint8_t wrPtr;
+    uint8_t rdPtr;
+    i2c_read(MAX30100_ADDRESS, MAX30100_FIFO_WR_PTR, &wrPtr, 1);
+    i2c_read(MAX30100_ADDRESS, MAX30100_FIFO_RD_PTR, &rdPtr, 1);
+    return (abs( 16 + wrPtr - rdPtr ) % 16);
+}
+
+void setInterrupt(interruptSource intsrc)
+{
+  uint8_t reg;
+  reg = (intsrc + 1) << 4;
+  i2c_write(MAX30100_ADDRESS, MAX30100_INT_ENABLE, &reg, 1);
+  i2c_read(MAX30100_ADDRESS, MAX30100_INT_STATUS, &reg, 1);
+}
+
+void setHighresModeEnabled(int enabled)
+{
+    uint8_t previous;
+    i2c_read(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &previous, 1);
+    if (enabled == 1)
     {
-        return false;
-    }
-
-    setMode(DEFAULT_MODE);
-    setLedsPulseWidth(DEFAULT_PULSE_WIDTH);
-    setSamplingRate(DEFAULT_SAMPLING_RATE);
-    setLedsCurrent(DEFAULT_IR_LED_CURRENT, DEFAULT_RED_LED_CURRENT);
-    setHighresModeEnabled(true);
-    return true;
-}
-
-static void setMode(Mode mode)
-{
-    writeRegister(MAX30100_REG_MODE_CONFIGURATION, mode);
-}
-
-static void setLedsPulseWidth(LEDPulseWidth ledPulseWidth)
-{
-    uint8_t previous = readRegister(MAX30100_REG_SPO2_CONFIGURATION);
-    writeRegister(MAX30100_REG_SPO2_CONFIGURATION, (previous & 0xfc) | ledPulseWidth);
-}
-
-static void setSamplingRate(SamplingRate samplingRate)
-{
-    uint8_t previous = readRegister(MAX30100_REG_SPO2_CONFIGURATION);
-    writeRegister(MAX30100_REG_SPO2_CONFIGURATION, (previous & 0xe3) | (samplingRate << 2));
-}
-
-static void setLedsCurrent(LEDCurrent irLedCurrent, LEDCurrent redLedCurrent)
-{
-    writeRegister(MAX30100_REG_LED_CONFIGURATION, redLedCurrent << 4 | irLedCurrent);
-}
-
-static void setHighresModeEnabled(bool enabled)
-{
-    uint8_t previous = readRegister(MAX30100_REG_SPO2_CONFIGURATION);
-    if (enabled)
-    {
-        writeRegister(MAX30100_REG_SPO2_CONFIGURATION, previous | MAX30100_SPC_SPO2_HI_RES_EN);
+      previous = previous | MAX30100_SPC_SPO2_HI_RES_EN;
+      i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &previous, 1);
     }
     else
     {
-        writeRegister(MAX30100_REG_SPO2_CONFIGURATION, previous & ~MAX30100_SPC_SPO2_HI_RES_EN);
+      previous = previous & ~MAX30100_SPC_SPO2_HI_RES_EN;
+      i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &previous, 1);
     }
 }
 
-static void update()
-{
-    readFifoData();
+void readSensor(hrData_t *data){
+  uint8_t temp[4] = {0};  // Temporary buffer for read values
+  i2c_read(MAX30100_ADDRESS, MAX30100_FIFO_DATA, temp, 4);  // Read four times from the FIFO
+  data->IR = (temp[0]<<8) | temp[1];    // Combine values to get the actual number
+  data->RED = (temp[2]<<8) | temp[3];   // Combine values to get the actual number
 }
 
-static bool getRawValues(uint16_t *ir, uint16_t *red)
-{
-    if (buffer[15] != 0)
-    {
-        *ir = bufferIR[indexIR];
-        *red = bufferIR[indexRED];
-        indexIR --;
-        indexRED --;
-        shiftBuf(bufferIR);
-        shiftBuf(bufferRED);
-        return true;
-    }
-    else
-    {
-        return false;
-    }
+void shutdown(void){
+  uint8_t reg;
+  i2c_read(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);  // Get the current register
+  reg = reg | 0x80;
+  i2c_write(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);   // mask the SHDN bit
 }
 
-static void resetFifo()
-{
-    writeRegister(MAX30100_REG_FIFO_WRITE_POINTER, 0);
-    writeRegister(MAX30100_REG_FIFO_READ_POINTER, 0);
-    writeRegister(MAX30100_REG_FIFO_OVERFLOW_COUNTER, 0);
+void reset(void){
+  uint8_t reg;
+  i2c_read(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);  // Get the current register
+  reg = reg | 0x40;
+  i2c_write(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);   // mask the RESET bit
 }
 
-static void readFifoData()
-{
-    uint8_t buffer[MAX30100_FIFO_DEPTH * 4];
-    uint8_t toRead;
-
-    toRead = (readRegister(MAX30100_REG_FIFO_WRITE_POINTER) - readRegister(MAX30100_REG_FIFO_READ_POINTER)) & (MAX30100_FIFO_DEPTH - 1);
-
-    if (toRead)
-    {
-        burstRead(MAX30100_REG_FIFO_DATA, buffer, 4 * toRead);
-
-        for (uint8_t i = 0; i < toRead; ++i)
-        {
-            // Warning: the values are always left-aligned
-            readoutsBuffer.push({.ir = (uint16_t)((buffer[i * 4] << 8) | buffer[i * 4 + 1]),
-                                 .red = (uint16_t)((buffer[i * 4 + 2] << 8) | buffer[i * 4 + 3])});
-        }
-    }
+void startup(void){
+  uint8_t reg;
+  i2c_read(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);  // Get the current register
+  reg = reg & 0x7F;
+  i2c_write(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &reg, 1);   // mask the SHDN bit
+}
+uint8_t getLostSample(void){
+  uint8_t buffer;
+  i2c_read(MAX30100_ADDRESS, MAX30100_OVRFLOW_CTR, &buffer, 1);
+  return buffer;
+}
+uint8_t getRevID(void){
+  uint8_t buffer;
+  i2c_read(MAX30100_ADDRESS, MAX30100_REV_ID, &buffer, 1);
+  return buffer;
 }
 
-static void startTemperatureSampling()
-{
-    uint8_t modeConfig = readRegister(MAX30100_REG_MODE_CONFIGURATION);
-    modeConfig |= MAX30100_MC_TEMP_EN;
-
-    writeRegister(MAX30100_REG_MODE_CONFIGURATION, modeConfig);
+uint8_t getPartID(void){
+  uint8_t buffer;
+  i2c_read(MAX30100_ADDRESS, MAX30100_PART_ID, &buffer, 1);
+  return buffer;
+}
+void begin(pulseWidth pw, ledCurrent ir, sampleRate sr){
+  uint8_t buffer;
+  buffer = 0x02;
+  i2c_write(MAX30100_ADDRESS, MAX30100_MODE_CONFIG, &buffer, 1); // Heart rate only
+  buffer = ir;
+  i2c_write(MAX30100_ADDRESS, MAX30100_LED_CONFIG, &buffer, 1);
+  buffer = (sr<<2)|pw;
+  i2c_write(MAX30100_ADDRESS, MAX30100_SPO2_CONFIG, &buffer, 1);
 }
 
-static bool isTemperatureReady()
-{
-    return !(readRegister(MAX30100_REG_MODE_CONFIGURATION) & MAX30100_MC_TEMP_EN);
+long meanDiff(uint16_t M) {
+  #define LM_SIZE 15
+  static uint16_t LM[LM_SIZE];      // LastMeasurements
+  static uint8_t index = 0;
+  static uint16_t sum = 0;
+  static int count = 0;
+  long avg = 0;
+
+  // keep sum updated to improve speed.
+  sum -= LM[index];
+  LM[index] = M;
+  sum += LM[index];
+  index++;
+  index = index % LM_SIZE;
+  if (count < LM_SIZE) count++;
+
+  avg = sum / count;
+  return avg - M;
 }
-
-static float retrieveTemperature()
-{
-    int8_t tempInteger = readRegister(MAX30100_REG_TEMPERATURE_DATA_INT);
-    float tempFrac = readRegister(MAX30100_REG_TEMPERATURE_DATA_FRAC);
-
-    return tempFrac * 0.0625 + tempInteger;
-}
-
-static void shutdown()
-{
-    uint8_t modeConfig = readRegister(MAX30100_REG_MODE_CONFIGURATION);
-    modeConfig |= MAX30100_MC_SHDN;
-
-    writeRegister(MAX30100_REG_MODE_CONFIGURATION, modeConfig);
-}
-
-static void resume()
-{
-    uint8_t modeConfig = readRegister(MAX30100_REG_MODE_CONFIGURATION);
-    modeConfig &= ~MAX30100_MC_SHDN;
-
-    writeRegister(MAX30100_REG_MODE_CONFIGURATION, modeConfig);
-}
-
-static uint8_t getPartId()
-{
-    return readRegister(0xff);
-}
-
-
-static uint8_t readRegister(uint8_t addr){
-    uint8_t rxBuff;
-    I2C_LeaderRead(MAX30100_I2C_ADDRESS, addr, &rxBuff, 1);
-    return rxBuff;
-}
-
-static void writeRegister(uint8_t addr, uint8_t data){
-    I2C_LeaderWrite(MAX30100_I2C_ADDRESS, addr, &data, 1);
-}
-
-static void burstRead(uint8_t addr, uint8_t *buf, uint8_t len){
-    I2C_LeaderRead(MAX30100_I2C_ADDRESS, addr, buf, len);
-}
-
-const struct hrm = {
-    begin,
-    setMode,
-    setLedsPulseWidth,
-    setSamplingRate,
-    setLedsCurrent,
-    setHighresModeEnabled,
-    update,
-    getRawValues,
-    resetFifo,
-    startTemperatureSampling,
-    isTemperatureReady,
-    retrieveTemperature,
-    shutdown,
-    resume,
-    getPartId
-};
